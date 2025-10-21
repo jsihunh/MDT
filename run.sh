@@ -9,4 +9,9 @@ DIFFUSION_FLAGS="--diffusion_steps 1000"
 TRAIN_FLAGS="--batch_size 32 --lr 5e-4"
 DATA_PATH=/dataset/imagenet-raw/train
 
-python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS scripts/image_train.py --data_dir $DATA_PATH $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS
+python scripts/image_train.py \
+  --data_dir $DATA_PATH \
+  --accelerator gpu \
+  --devices $NUM_GPUS \
+  --strategy ddp \
+  $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS

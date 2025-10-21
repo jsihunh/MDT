@@ -4,56 +4,72 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+"""Sampling script that relies on the Lightning MDT module."""
+
+import argparse
+from pathlib import Path
+from typing import List, Optional
+
+import pytorch_lightning as pl
 import torch
 from torchvision.utils import save_image
-from masked_diffusion import create_diffusion
-from diffusers.models import AutoencoderKL
-from masked_diffusion.models import MDTv2_XL_2
+
+from masked_diffusion.lightning_module import MDTLightningModule
 
 
-# Setup PyTorch:
-torch.manual_seed(1)
-torch.set_grad_enabled(False)
-device = "cuda" if torch.cuda.is_available() else "cpu"
-num_sampling_steps = 250
-cfg_scale = 4.0
-pow_scale = 0.01 # large pow_scale increase the diversity, small pow_scale increase the quality.
-model_path = 'mdt_xl2_v2_ckpt.pt'
-
-# Load model:
-image_size = 256
-assert image_size in [256], "We provide pre-trained models for 256x256 resolutions for now."
-latent_size = image_size // 8
-model = MDTv2_XL_2(input_size=latent_size, decode_layer=4).to(device)
-
-state_dict = torch.load(model_path, map_location=lambda storage, loc: storage)
-model.load_state_dict(state_dict)
-model.eval()
-diffusion = create_diffusion(str(num_sampling_steps))
-vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
-
-# Labels to condition the model with:
-class_labels = [19,23,106,108,278,282]
-
-# Create sampling noise:
-n = len(class_labels)
-z = torch.randn(n, 4, latent_size, latent_size, device=device)
-y = torch.tensor(class_labels, device=device)
-
-# Setup classifier-free guidance:
-z = torch.cat([z, z], 0)
-y_null = torch.tensor([1000] * n, device=device)
-y = torch.cat([y, y_null], 0)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate images with a trained MDT Lightning checkpoint.")
+    parser.add_argument("--checkpoint", type=Path, required=True, help="Path to a PyTorch Lightning checkpoint (.ckpt).")
+    parser.add_argument("--output", type=Path, default=Path("sample.jpg"), help="File to save the generated grid of images.")
+    parser.add_argument(
+        "--class_labels",
+        type=int,
+        nargs="*",
+        default=[19, 23, 106, 108, 278, 282],
+        help="Optional class labels to condition the model. Leave empty for unconditional generation.",
+    )
+    parser.add_argument("--cfg_scale", type=float, default=4.0, help="Classifier-free guidance scale.")
+    parser.add_argument(
+        "--pow_scale",
+        type=float,
+        default=0.01,
+        help="Power scheduling factor for classifier-free guidance interpolation.",
+    )
+    parser.add_argument("--num_sampling_steps", type=int, default=250, help="Number of diffusion sampling steps.")
+    parser.add_argument("--ema_index", type=int, default=0, help="EMA index to use for sampling (-1 to disable EMA).")
+    parser.add_argument("--batch_size", type=int, default=0, help="Batch size for unconditional sampling.")
+    parser.add_argument("--seed", type=int, default=1, help="Random seed for reproducibility.")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device for generation.")
+    parser.add_argument("--nrow", type=int, default=3, help="Number of images per row in the output grid.")
+    return parser.parse_args()
 
 
-model_kwargs = dict(y=y, cfg_scale=cfg_scale, scale_pow=pow_scale)
+def main() -> None:
+    args = parse_args()
 
-# Sample images:
-samples = diffusion.p_sample_loop(
-    model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=True, device=device
-)
-samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
-samples = vae.decode(samples / 0.18215).sample
+    pl.seed_everything(args.seed, workers=True)
+    torch.set_grad_enabled(False)
 
-# Save and display images:
-save_image(samples, "sample.jpg", nrow=3, normalize=True, value_range=(-1, 1))
+    module = MDTLightningModule.load_from_checkpoint(str(args.checkpoint), map_location=args.device)
+    module.eval()
+    module.to(args.device)
+
+    class_labels: Optional[List[int]] = args.class_labels if args.class_labels else None
+    batch_size = args.batch_size if args.batch_size > 0 else None
+    ema_index = args.ema_index if args.ema_index >= 0 else None
+
+    samples = module.sample(
+        class_labels=class_labels,
+        batch_size=batch_size,
+        num_sampling_steps=args.num_sampling_steps,
+        cfg_scale=args.cfg_scale if class_labels is not None else None,
+        pow_scale=args.pow_scale,
+        ema_index=ema_index,
+    )
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    save_image(samples, args.output, nrow=args.nrow, normalize=True, value_range=(-1, 1))
+
+
+if __name__ == "__main__":
+    main()
