@@ -48,6 +48,7 @@ git clone https://github.com/sail-sg/MDT
 cd MDT
 pip install -e .
 ```
+The package installation now includes PyTorch Lightning, which powers the simplified training workflow described below.
 Install [Adan optimizer](https://github.com/sail-sg/Adan), Adan is a strong optimizer with faster convergence speed than AdamW. [(paper)](https://arxiv.org/abs/2208.06677)
 ```
 python -m pip install git+https://github.com/sail-sg/Adan.git
@@ -59,6 +60,43 @@ python -m pip install git+https://github.com/sail-sg/Adan.git
 as the [ADM's dataloder](https://github.com/openai/guided-diffusion) gets the class ID from the file name. 
 
 # Training
+
+## PyTorch Lightning workflow
+
+We provide a fully-integrated PyTorch Lightning pipeline that covers dataset loading, training, checkpointing, and sampling.
+
+```bash
+python scripts/lightning_train.py \
+  --data_dir /path/to/imagenet \
+  --model MDTv2_S_2 \
+  --image_size 256 \
+  --mask_ratio 0.30 \
+  --decode_layer 6 \
+  --batch_size 32 \
+  --max_steps 250000 \
+  --devices auto \
+  --accelerator auto
+```
+
+Key flags:
+
+- `--devices` and `--accelerator` integrate seamlessly with Lightning strategies for single or multi-GPU setups.
+- `--checkpoint_every_n_steps` controls automatic checkpointing frequency.
+- `--resume_from_checkpoint` can restore an interrupted run using the saved Lightning checkpoint.
+
+After training, generate samples directly from the Lightning checkpoint:
+
+```bash
+python scripts/lightning_generate.py \
+  --checkpoint lightning_logs/mdt-000250000.ckpt \
+  --class_labels 19 23 106 108 278 282 \
+  --num_steps 250 \
+  --cfg_scale 4.0 \
+  --pow_scale 0.01 \
+  --output sample.jpg
+```
+
+The script automatically loads the VAE, restores the MDT weights, performs classifier-free guidance sampling, and saves a normalized image grid.
 
 <details>
   <summary>Training on one node (`run.sh`). </summary>
