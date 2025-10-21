@@ -53,7 +53,42 @@ Install [Adan optimizer](https://github.com/sail-sg/Adan), Adan is a strong opti
 python -m pip install git+https://github.com/sail-sg/Adan.git
 ```
 
-**DATA** 
+## PyTorch Lightning workflow
+
+To simplify experimentation we provide PyTorch Lightning scripts that cover both training and sampling. They encapsulate MDT-specific utilities while exposing the familiar Lightning command-line options.
+
+### Training
+
+```bash
+python scripts/lightning_train.py \
+  --data_dir /path/to/imagenet \
+  --model MDTv2_S_2 \
+  --image_size 256 \
+  --mask_ratio 0.30 \
+  --decode_layer 6 \
+  --batch_size 32 \
+  --devices 8 \
+  --accelerator gpu \
+  --precision 16
+```
+
+Lightning automatically manages device placement, gradient accumulation, checkpointing, and TensorBoard logging in `lightning_logs`. Inspect `python scripts/lightning_train.py --help` to see every available flag inherited from the original pipeline.
+
+### Sampling
+
+```bash
+python scripts/lightning_generate.py \
+  --checkpoint checkpoints/mdt-step.ckpt \
+  --num_samples 50000 \
+  --batch_size 64 \
+  --num_sampling_steps 250 \
+  --cfg_cond \
+  --class_cond
+```
+
+The generator restores the Lightning module, updates the sampling schedule, and stores an `.npz` file with uint8 images inside `samples/` by default.
+
+**DATA**
 - For standard datasets like ImageNet and CIFAR, please refer to '[dataset](https://github.com/sail-sg/MDT/tree/main/datasets)' for preparation.
 - When using customized dataset, change the image file name to `ClassID_ImgID.jpg`,
 as the [ADM's dataloder](https://github.com/openai/guided-diffusion) gets the class ID from the file name. 
