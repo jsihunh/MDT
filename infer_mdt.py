@@ -6,9 +6,9 @@
 
 import torch
 from torchvision.utils import save_image
-from masked_diffusion import create_diffusion
-from diffusers.models import AutoencoderKL
-from masked_diffusion.models import MDTv2_XL_2
+
+from masked_diffusion import create_diffusion, diffusion_defaults
+from masked_diffusion.lightning_module import MDTLightningModule
 
 
 # Setup PyTorch:
@@ -24,13 +24,31 @@ model_path = 'mdt_xl2_v2_ckpt.pt'
 image_size = 256
 assert image_size in [256], "We provide pre-trained models for 256x256 resolutions for now."
 latent_size = image_size // 8
-model = MDTv2_XL_2(input_size=latent_size, decode_layer=4).to(device)
+try:
+    module = MDTLightningModule.from_pretrained(
+        model_path,
+        strict=False,
+        map_location=device,
+    )
+except Exception:
+    diff_config = diffusion_defaults()
+    diff_config.update(dict(diffusion_steps=num_sampling_steps, timestep_respacing=str(num_sampling_steps)))
+    module = MDTLightningModule(
+        model_name="MDTv2_XL_2",
+        image_size=image_size,
+        mask_ratio=None,
+        decode_layer=4,
+        diffusion_config=diff_config,
+        class_cond=True,
+    )
+    state_dict = torch.load(model_path, map_location=lambda storage, loc: storage)
+    module.model.load_state_dict(state_dict)
 
-state_dict = torch.load(model_path, map_location=lambda storage, loc: storage)
-model.load_state_dict(state_dict)
+model = module.model.to(device)
 model.eval()
 diffusion = create_diffusion(str(num_sampling_steps))
-vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
+module.to(device)
+module.instantiate_first_stage()
 
 # Labels to condition the model with:
 class_labels = [19,23,106,108,278,282]
@@ -53,7 +71,7 @@ samples = diffusion.p_sample_loop(
     model.forward_with_cfg, z.shape, z, clip_denoised=False, model_kwargs=model_kwargs, progress=True, device=device
 )
 samples, _ = samples.chunk(2, dim=0)  # Remove null class samples
-samples = vae.decode(samples / 0.18215).sample
+samples = module.decode_first_stage(samples)
 
 # Save and display images:
 save_image(samples, "sample.jpg", nrow=3, normalize=True, value_range=(-1, 1))

@@ -48,6 +48,11 @@ git clone https://github.com/sail-sg/MDT
 cd MDT
 pip install -e .
 ```
+Install [PyTorch Lightning](https://lightning.ai/docs/pytorch/latest/) and the Stable Diffusion VAE dependency used for encoding/decoding latents:
+
+```
+pip install pytorch-lightning diffusers
+```
 Install [Adan optimizer](https://github.com/sail-sg/Adan), Adan is a strong optimizer with faster convergence speed than AdamW. [(paper)](https://arxiv.org/abs/2208.06677)
 ```
 python -m pip install git+https://github.com/sail-sg/Adan.git
@@ -60,53 +65,45 @@ as the [ADM's dataloder](https://github.com/openai/guided-diffusion) gets the cl
 
 # Training
 
-<details>
-  <summary>Training on one node (`run.sh`). </summary>
+## PyTorch Lightning workflow
 
-```shell
-export OPENAI_LOGDIR=output_mdtv2_s2
-NUM_GPUS=8
+We now provide an end-to-end LightningModule (`masked_diffusion.lightning_module.MDTLightningModule`) that encapsulates the original training utilities. The entrypoints are located in `scripts/lightning_train.py` and `scripts/lightning_sample.py`.
+
+### Training
+
+```bash
+export OUTPUT_DIR=output_mdtv2_s2
+DATA_PATH=/dataset/imagenet
 
 MODEL_FLAGS="--image_size 256 --mask_ratio 0.30 --decode_layer 6 --model MDTv2_S_2"
 DIFFUSION_FLAGS="--diffusion_steps 1000"
-TRAIN_FLAGS="--batch_size 32"
-DATA_PATH=/dataset/imagenet
+TRAIN_FLAGS="--batch_size 32 --lr 5e-4"
 
-python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS scripts/image_train.py --data_dir $DATA_PATH $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS
+python scripts/lightning_train.py \
+  --data_dir ${DATA_PATH} \
+  --devices 8 \
+  --accelerator gpu \
+  --strategy ddp \
+  --output_dir ${OUTPUT_DIR} \
+  $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS
 ```
 
-</details>
+`lightning_train.py` exposes the same modelling hyper-parameters as the legacy scripts while adding convenience options such as automatic checkpointing (`--checkpoint_every_n_steps`), gradient accumulation (`--accumulate_grad_batches`), and learning-rate monitoring (`--monitor_lr`).
 
-<details>
-  <summary>Training on multiple nodes (`run_ddp_master.sh` and `run_ddp_worker.sh`). </summary>
+### Sampling
 
-```shell
-# On master:
-export OPENAI_LOGDIR=output_mdtv2_xl2
-MODEL_FLAGS="--image_size 256 --mask_ratio 0.30 --decode_layer 4 --model MDTv2_XL_2"
-DIFFUSION_FLAGS="--diffusion_steps 1000"
-TRAIN_FLAGS="--batch_size 4"
-DATA_PATH=/dataset/imagenet
-NUM_NODE=8
-GPU_PRE_NODE=8
+Use the Lightning checkpoint produced during training to generate images:
 
-python -m torch.distributed.launch --master_addr=$(hostname) --nnodes=$NUM_NODE --node_rank=$RANK --nproc_per_node=$GPU_PRE_NODE --master_port=$MASTER_PORT scripts/image_train.py --data_dir $DATA_PATH $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS
-
-# On workers:
-export OPENAI_LOGDIR=output_mdtv2_xl2
-MODEL_FLAGS="--image_size 256 --mask_ratio 0.30 --decode_layer 4 --model MDTv2_XL_2"
-DIFFUSION_FLAGS="--diffusion_steps 1000"
-TRAIN_FLAGS="--batch_size 4"
-DATA_PATH=/dataset/imagenet
-NUM_NODE=8
-GPU_PRE_NODE=8
-
-python -m torch.distributed.launch --master_addr=$MASTER_ADDR --nnodes=$NUM_NODE --node_rank=$RANK --nproc_per_node=$GPU_PRE_NODE --master_port=$MASTER_PORT scripts/image_train.py --data_dir $DATA_PATH $MODEL_FLAGS $DIFFUSION_FLAGS $TRAIN_FLAGS
-
-
+```bash
+python scripts/lightning_sample.py \
+  --checkpoint_path ${OUTPUT_DIR}/mdt-0005000.ckpt \
+  --num_samples 64 \
+  --batch_size 16 \
+  --cfg_cond True \
+  --output_dir ${OUTPUT_DIR}/samples
 ```
 
-</details>
+The sampler handles classifier-free guidance, DDIM/ancestral sampling, and will automatically decode latents with the Stable Diffusion VAE. Set `--use_cpu` to run on CPU.
 
 # Evaluation
 
@@ -117,40 +114,24 @@ Please follow the instructions in the `evaluations` folder to set up the evaluat
   <summary>Sampling and Evaluation (`run_sample.sh`): </summary>
 
 ```shell
-MODEL_PATH=output_mdtv2_xl2/mdt_xl2_v2_ckpt.pt
-export OPENAI_LOGDIR=output_mdtv2_xl2_eval
-NUM_GPUS=8
+CHECKPOINT=output_mdtv2_xl2/mdt-0002500.ckpt
+OUTPUT_DIR=output_mdtv2_xl2_eval
 
-echo 'CFG Class-conditional sampling:'
-MODEL_FLAGS="--image_size 256 --model MDTv2_XL_2 --decode_layer 4"
-DIFFUSION_FLAGS="--num_sampling_steps 250 --num_samples 50000  --cfg_cond True"
-echo $MODEL_FLAGS
-echo $DIFFUSION_FLAGS
-echo $MODEL_PATH
-python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS scripts/image_sample.py --model_path $MODEL_PATH $MODEL_FLAGS $DIFFUSION_FLAGS
-echo $MODEL_FLAGS
-echo $DIFFUSION_FLAGS
-echo $MODEL_PATH
-python evaluations/evaluator.py ../dataeval/VIRTUAL_imagenet256_labeled.npz $OPENAI_LOGDIR/samples_50000x256x256x3.npz
+python scripts/lightning_sample.py \
+  --checkpoint_path ${CHECKPOINT} \
+  --num_samples 50000 \
+  --batch_size 256 \
+  --cfg_cond True \
+  --output_dir ${OUTPUT_DIR}
 
-echo 'Class-conditional sampling:'
-MODEL_FLAGS="--image_size 256 --model MDTv2_XL_2 --decode_layer 4"
-DIFFUSION_FLAGS="--num_sampling_steps 250 --num_samples 50000"
-echo $MODEL_FLAGS
-echo $DIFFUSION_FLAGS
-echo $MODEL_PATH
-python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS scripts/image_sample.py --model_path $MODEL_PATH $MODEL_FLAGS $DIFFUSION_FLAGS
-echo $MODEL_FLAGS
-echo $DIFFUSION_FLAGS
-echo $MODEL_PATH
-python evaluations/evaluator.py ../dataeval/VIRTUAL_imagenet256_labeled.npz $OPENAI_LOGDIR/samples_50000x256x256x3.npz
+python evaluations/evaluator.py ../dataeval/VIRTUAL_imagenet256_labeled.npz ${OUTPUT_DIR}/samples_50000x256x256x3.npz
 ```
 
 </details>
 
 # Visualization
 
-Run the `infer_mdt.py` to generate images.
+Run the `infer_mdt.py` script to generate images. It now understands both Lightning checkpoints and legacy `.pt` model weights.
 
 # Citation
 
